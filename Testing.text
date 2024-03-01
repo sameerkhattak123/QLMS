@@ -1,0 +1,131 @@
+const express = require('express');
+const router = express.Router();
+const { check, validationResult } = require('express-validator');
+const auth = require('../../middleware/auth');
+const fs = require('fs');
+const { normalize } = require('path');
+const Profile = require('../../models/Profile');
+const User = require('../../models/User');
+const Forum = require('../../models/Forum');
+
+// ... Other routes and middleware ...
+
+// @route    POST api/profile
+// @desc     Create or update user profile
+// @access   Private
+router.post(
+  '/',
+  auth,
+  upload.single('profilepicture'), // Middleware to handle file upload
+  [
+    check('country', 'Country is required').notEmpty(),
+    // Add validation checks for other fields
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    // Get the profile fields from the request body
+    const { 
+      country, bio, address, 
+      contact, website, skills, youtube, twitter, instagram,
+      linkedin, facebook, ...rest
+    } = req.body;
+
+    // Build the profile object
+    const profileFields = {
+      user: req.user,
+      country,
+      bio,
+      address,
+      contact,
+      ...rest
+    };
+
+    // Get user's email and username from the User model
+    try {
+      const user = await User.findById(req.user);
+      if (user) {
+        profileFields.email = user.email;
+        profileFields.userName = user.firstName;
+      }
+    } catch (err) {
+      console.error(err.message);
+      return res.status(500).send('Server Error');
+    }
+
+    // Build socialFields object
+    const socialFields = { youtube, twitter, instagram, linkedin, facebook };
+
+    for (const [key, value] of Object.entries(socialFields)) {
+      if (value && value.length > 0)
+        socialFields[key] = normalize(value, { forceHttps: true });
+    }
+
+    profileFields.social = socialFields;
+
+    // Set the profile picture if it exists in the request
+    if (req.file) {
+      profileFields.profilepicture = req.file.filename; // Save the filename of the uploaded file
+    }
+
+    try {
+      let profile = await Profile.findOne({ user: req.user });
+
+      if (profile) {
+        // Check if a new profile picture is uploaded
+        if (req.file) {
+          // Delete the previous profile picture file if it exists
+          const previousProfilePicture = profile.profilepicture;
+          if (previousProfilePicture) {
+            const profilePicturePath = `${profilePicturesDir}/${previousProfilePicture}`;
+            if (fs.existsSync(profilePicturePath)) {
+              fs.unlinkSync(profilePicturePath);
+            }
+          }
+
+          // Update the profile with the new profile picture
+          profile = await Profile.findOneAndUpdate(
+            { user: req.user },
+            { $set: { ...profileFields, profilepicture: req.file.filename } },
+            { new: true, upsert: true, setDefaultsOnInsert: true }
+          );
+
+          // Update the profile picture in the Forum model where the user is the author
+          await Forum.updateMany(
+            { 'author': req.user, 'authorModel': 'User' },
+            { $set: { 'profilePicture': req.file.filename } }
+          );
+
+          // Update the profile picture in the comments where the user has commented
+          await Forum.updateMany(
+            { 'comments.author': req.user, 'comments.authorModel': 'User' },
+            { $set: { 'comments.$[comment].profilePicture': req.file.filename } },
+            { arrayFilters: [{ 'comment.author': req.user, 'comment.authorModel': 'User' }] }
+          );
+        } else {
+          // Update the profile without changing the profile picture
+          profile = await Profile.findOneAndUpdate(
+            { user: req.user },
+            { $set: profileFields },
+            { new: true, upsert: true, setDefaultsOnInsert: true }
+          );
+        }
+
+        return res.json(profile);
+      }
+
+      // Create a new profile
+      profile = new Profile(profileFields);
+      await profile.save();
+      res.json(profile);
+    } catch (err) {
+      console.error(err.message);
+      res.status(500).send('Server Error');
+    }
+  }
+);
+
+module.exports = router;
